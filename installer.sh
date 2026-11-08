@@ -1,290 +1,272 @@
 #!/usr/bin/env bash
-# Atyro Panel v1.0.0 installer
+# Atyro Panel installer — dependency-aware, repeatable Debian/Ubuntu installer
 # Usage: bash install.sh [installation-directory]
 
 set -Eeuo pipefail
+IFS=$'\n\t'
 
 REPO_URL="https://github.com/atyrolabs/panel.git"
 ZIP_NAME="atyro-panel-v1.0.0.zip"
 DEFAULT_DIR="/var/www/panel"
+NODE_MAJOR="24"
 
-# Orange-themed terminal UI
-ORANGE='\033[38;5;208m'
-WHITE='\033[1;37m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-DIM='\033[2m'
-BOLD='\033[1m'
-RESET='\033[0m'
-
+ORANGE='\033[38;5;208m'; WHITE='\033[1;37m'; GREEN='\033[0;32m'
+YELLOW='\033[1;33m'; RED='\033[0;31m'; DIM='\033[2m'
+BOLD='\033[1m'; RESET='\033[0m'
 if [[ ! -t 1 ]]; then
-  ORANGE='' WHITE='' GREEN='' YELLOW='' RED='' DIM='' BOLD='' RESET=''
+  ORANGE=''; WHITE=''; GREEN=''; YELLOW=''; RED=''; DIM=''; BOLD=''; RESET=''
 fi
 
-spin() {
-  local pid="$1" message="$2"
-  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-  local i=0
-  while kill -0 "$pid" 2>/dev/null; do
-    printf "\r${ORANGE}%s${RESET} %s" "${frames[i % ${#frames[@]}]}" "$message"
-    i=$((i + 1))
-    sleep 0.1
-  done
-  wait "$pid"
-  local result=$?
-  printf "\r"
-  return "$result"
-}
+WORK_DIR=""
+SUDO=()
 
-step() { printf "\n${ORANGE}${BOLD}➜${RESET} ${WHITE}%s${RESET}\n" "$1"; }
-ok()   { printf "${GREEN}✔${RESET} %s\n" "$1"; }
-warn() { printf "${YELLOW}⚠${RESET} %s\n" "$1"; }
-fail() { printf "${RED}✖${RESET} %s\n" "$1" >&2; }
+step() { printf "\n%b➜%b %b%s%b\n" "$ORANGE$BOLD" "$RESET" "$WHITE" "$1" "$RESET"; }
+ok()   { printf "%b✔%b %s\n" "$GREEN" "$RESET" "$1"; }
+warn() { printf "%b⚠%b %s\n" "$YELLOW" "$RESET" "$1"; }
+fail() { printf "%b✖%b %s\n" "$RED" "$RESET" "$1" >&2; }
 
 cleanup() {
-  [[ -n "${WORK_DIR:-}" && -d "${WORK_DIR:-}" ]] && rm -rf -- "$WORK_DIR"
+  if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+    rm -rf -- "$WORK_DIR"
+  fi
 }
 on_error() {
   local code=$?
-  fail "Installation failed near line ${BASH_LINENO[0]:-unknown} (exit code: $code)."
-  [[ -n "${WORK_DIR:-}" ]] && printf "${DIM}Temporary files: %s${RESET}\n" "$WORK_DIR"
+  trap - ERR
+  fail "Installation failed (exit code $code, near line ${BASH_LINENO[0]:-unknown})."
+  if [[ -n "$WORK_DIR" && -f "$WORK_DIR/npm.log" ]]; then
+    printf "\n%s\n" "Last npm output:"
+    tail -n 60 "$WORK_DIR/npm.log" >&2 || true
+  fi
   exit "$code"
 }
 trap on_error ERR
+trap cleanup EXIT
 
-clear 2>/dev/null || true
-printf "${ORANGE}${BOLD}"
-cat <<'BANNER'
-  _____               _   _   ______   _      
- |  __ \      /\     | \ | | |  ____| | |     
- | |__) |    /  \    |  \| | | |__    | |     
- |  ___/    / /\ \   | . ` | |  __|   | |     
- | |       / ____ \  | |\  | | |____  | |____ 
- |_|      /_/    \_\ |_| \_| |______| |______|
-                                                                                            
-BANNER
-printf "${RESET}"
-printf "${WHITE}${BOLD}             ATYRO PANEL v1.0.0${RESET}\n"
-printf "${DIM}          Interactive Installation Wizard${RESET}\n\n"
-
-if [[ "${EUID}" -ne 0 ]]; then
-  warn "Not running as root. You may need sudo permissions for /var/www."
-fi
-
-# Install Node.js + npm automatically when missing (interactive yes/no).
-if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-  printf "\n${YELLOW}Node.js and/or npm are not installed.${RESET}\n"
-  printf "Install Node.js 23.x and npm automatically using NodeSource? [Y/n]: "
-  read -r install_node
-  install_node="${install_node:-Y}"
-
-  if [[ "$install_node" =~ ^[Yy]$ ]]; then
-    if ! command -v apt-get >/dev/null 2>&1; then
-      fail "Automatic Node.js installation currently supports Debian/Ubuntu (apt-get)."
-      exit 1
-    fi
-
-    if [[ "${EUID}" -ne 0 ]]; then
-      if ! command -v sudo >/dev/null 2>&1; then
-        fail "Please run this installer as root (sudo is unavailable)."
-        exit 1
-      fi
-      SUDO="sudo"
-    else
-      SUDO=""
-    fi
-
-    if ! command -v curl >/dev/null 2>&1; then
-      step "Installing curl prerequisite"
-      $SUDO apt-get update -y
-      $SUDO apt-get install -y curl
-    fi
-
-    step "Installing Node.js 23.x and npm"
-    $SUDO bash -c 'curl -sL https://deb.nodesource.com/setup_23.x | bash -'
-    $SUDO apt-get install -y nodejs
-    ok "Node.js and npm installed."
+prompt_value() {
+  local prompt="$1" default="$2" answer=""
+  if [[ -r /dev/tty ]]; then
+    printf "%b%s%b %b[default: %s]%b: " "$WHITE" "$prompt" "$RESET" "$DIM" "$default" "$RESET" >/dev/tty
+    IFS= read -r answer </dev/tty || true
   else
-    fail "Node.js and npm are required. Install them and rerun this script."
-    exit 1
+    printf "%s (default: %s)\n" "$prompt" "$default"
   fi
+  printf '%s' "${answer:-$default}"
+}
+
+has_tty() { [[ -r /dev/tty && -w /dev/tty ]]; }
+
+printf "%b" "$ORANGE$BOLD"
+cat <<'BANNER'
+   _____               _   _   ______   _
+  |  __ \      /\     | \ | | |  ____| | |
+  | |__) |    /  \    |  \| | | |__    | |
+  |  ___/    / /\ \   | . ` | |  __|   | |
+  | |       / ____ \  | |\  | | |____  | |____
+  |_|      /_/    \_\ |_| \_| |______| |______|
+BANNER
+printf "%b" "$RESET"
+printf "%b             ATYRO PANEL INSTALLER%b\n" "$WHITE$BOLD" "$RESET"
+printf "%b       Automatic dependency installation%b\n\n" "$DIM" "$RESET"
+
+if [[ "$EUID" -eq 0 ]]; then
+  SUDO=()
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  SUDO=(sudo)
+elif has_tty && command -v sudo >/dev/null 2>&1; then
+  SUDO=(sudo)
+else
+  fail "Run as root, or provide sudo access. Example: sudo bash install.sh"
+  exit 1
 fi
 
-for cmd in git unzip node npm; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    fail "Required command '$cmd' was not found. Please install it and rerun."
-    exit 1
-  fi
+if [[ ! -r /etc/os-release ]]; then
+  fail "Cannot identify this operating system. Debian/Ubuntu is required."
+  exit 1
+fi
+# shellcheck disable=SC1091
+source /etc/os-release
+OS_ID="${ID:-unknown}"
+OS_LIKE="${ID_LIKE:-}"
+if [[ "$OS_ID" != "debian" && "$OS_ID" != "ubuntu" && "$OS_LIKE" != *debian* ]]; then
+  fail "This installer currently supports Debian/Ubuntu-based systems only (detected: $OS_ID)."
+  exit 1
+fi
+if ! command -v apt-get >/dev/null 2>&1; then
+  fail "apt-get is required on this operating system."
+  exit 1
+fi
+
+step "Checking and installing system dependencies"
+APT_PACKAGES=(git unzip curl ca-certificates gnupg build-essential python3 make g++)
+"${SUDO[@]}" apt-get update -y
+"${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_PACKAGES[@]}"
+ok "System dependencies are installed."
+
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 ||
+   (( $(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0) < NODE_MAJOR )); then
+  step "Installing Node.js ${NODE_MAJOR}.x LTS and npm"
+  NODE_SETUP="$(mktemp -t atyro-nodesource.XXXXXX)"
+  curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o "$NODE_SETUP"
+  "${SUDO[@]}" bash "$NODE_SETUP"
+  rm -f "$NODE_SETUP"
+  "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+fi
+
+for cmd in git unzip curl node npm; do
+  command -v "$cmd" >/dev/null 2>&1 || { fail "Required command '$cmd' is still unavailable after installation."; exit 1; }
 done
-ok "Git, unzip, Node.js and npm are available."
-printf "    Node.js: %s | npm: %s\n" "$(node --version)" "$(npm --version)"
+NODE_VERSION="$(node --version)"
+NODE_MAJOR_INSTALLED="$(node -p 'Number(process.versions.node.split(".")[0])')"
+if (( NODE_MAJOR_INSTALLED < NODE_MAJOR )); then
+  fail "Node.js ${NODE_MAJOR}.x or newer is required; found $NODE_VERSION."
+  exit 1
+fi
+ok "Node.js $NODE_VERSION and npm $(npm --version) are ready."
 
 INSTALL_DIR="${1:-}"
 if [[ -z "$INSTALL_DIR" ]]; then
-  printf "\n${WHITE}Installation directory${RESET} ${DIM}[default: ${DEFAULT_DIR}]${RESET}: "
-  read -r INSTALL_DIR
-  INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_DIR}"
+  INSTALL_DIR="$(prompt_value "Installation directory" "$DEFAULT_DIR")"
 fi
-
-# Normalize trailing slash and reject dangerous destinations.
 INSTALL_DIR="${INSTALL_DIR%/}"
-[[ -n "$INSTALL_DIR" ]] || { fail "Installation directory cannot be /."; exit 1; }
-[[ "$INSTALL_DIR" != "/" ]] || { fail "Refusing to install directly into /."; exit 1; }
-
-if [[ -e "$INSTALL_DIR" ]] && [[ -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-  printf "${YELLOW}The target directory already exists and is not empty:${RESET} %s\n" "$INSTALL_DIR"
-  printf "Continue and allow files to be merged/overwritten? [y/N]: "
-  read -r answer
-  [[ "$answer" =~ ^[Yy]$ ]] || { printf "Cancelled.\n"; exit 0; }
+[[ -n "$INSTALL_DIR" && "$INSTALL_DIR" != "/" ]] || { fail "Invalid installation directory."; exit 1; }
+if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR" ]]; then
+  fail "The installation path exists but is not a directory: $INSTALL_DIR"
+  exit 1
+fi
+if [[ -d "$INSTALL_DIR" ]] && find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+  warn "The target directory is not empty. Existing files may be updated; your .env will be preserved."
+  if has_tty; then
+    printf "Continue? [y/N]: " >/dev/tty
+    IFS= read -r answer </dev/tty || answer=""
+    [[ "$answer" =~ ^[Yy]$ ]] || { printf "Cancelled.\n"; exit 0; }
+  else
+    fail "Non-empty target directory requires interactive confirmation. Re-run with a clean directory."
+    exit 1
+  fi
 fi
 
 WORK_DIR="$(mktemp -d -t atyro-panel-install.XXXXXX)"
-trap cleanup EXIT
+# Back up user configuration before copying release files over the target.
+[[ ! -f "$INSTALL_DIR/.env" ]] || cp -p "$INSTALL_DIR/.env" "$WORK_DIR/existing.env"
+[[ ! -f "$INSTALL_DIR/test.env" ]] || cp -p "$INSTALL_DIR/test.env" "$WORK_DIR/existing.test.env"
 
-step "Preparing installation directory"
-mkdir -p -- "$INSTALL_DIR"
-INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd)"
-ok "Target: $INSTALL_DIR"
-
-step "Cloning Atyro Labs repository"
-git clone --depth 1 "$REPO_URL" "$WORK_DIR/repository" >"$WORK_DIR/git.log" 2>&1 &
-pid=$!
-if spin "$pid" "Cloning repository..."; then
-  ok "Repository cloned."
-else
+step "Downloading Atyro Panel source"
+if ! git clone --depth 1 "$REPO_URL" "$WORK_DIR/repository" >"$WORK_DIR/git.log" 2>&1; then
   cat "$WORK_DIR/git.log" >&2
-  fail "Could not clone $REPO_URL"
+  fail "Could not clone the repository. Check network access and GitHub availability."
   exit 1
 fi
+ok "Repository downloaded."
 
 ZIP_PATH="$WORK_DIR/repository/$ZIP_NAME"
 if [[ ! -f "$ZIP_PATH" ]]; then
-  fail "Expected archive was not found: $ZIP_NAME"
-  printf "Check that the archive exists in the repository's main branch.\n"
+  fail "Archive not found in repository: $ZIP_NAME"
+  printf "Confirm that the release archive exists at the repository root.\n" >&2
   exit 1
 fi
 
-step "Extracting Atyro Panel v1.0.0"
+step "Extracting release archive"
 mkdir -p "$WORK_DIR/extracted"
-unzip -q "$ZIP_PATH" -d "$WORK_DIR/extracted" &
-pid=$!
-if spin "$pid" "Extracting panel files..."; then
-  ok "ZIP archive extracted."
-else
-  fail "Could not extract $ZIP_NAME"
-  exit 1
-fi
-
-# If the ZIP contains a single wrapper directory, install its contents.
+unzip -q "$ZIP_PATH" -d "$WORK_DIR/extracted"
 SOURCE_DIR="$WORK_DIR/extracted"
 if [[ ! -f "$SOURCE_DIR/package.json" ]]; then
-  PACKAGE_JSON="$(find "$WORK_DIR/extracted" -mindepth 2 -maxdepth 3 -type f -name package.json -print -quit)"
+  PACKAGE_JSON="$(find "$WORK_DIR/extracted" -mindepth 2 -maxdepth 5 -type f -name package.json -print -quit)"
   if [[ -n "$PACKAGE_JSON" ]]; then
     SOURCE_DIR="$(dirname "$PACKAGE_JSON")"
   fi
 fi
-
 if [[ ! -f "$SOURCE_DIR/package.json" ]]; then
-  fail "package.json was not found in the extracted archive. Check the ZIP structure."
+  fail "package.json was not found in the release archive."
   exit 1
 fi
-
-cp -a "$SOURCE_DIR/." "$INSTALL_DIR/"
-ok "Panel files copied into the installation directory."
-
-step "Configuring .env"
-ENV_FILE="$INSTALL_DIR/.env"
-if [[ -f "$ENV_FILE" || -f "$INSTALL_DIR/test.env" ]]; then
-  SOURCE_ENV="$ENV_FILE"
-  [[ -f "$SOURCE_ENV" ]] || SOURCE_ENV="$INSTALL_DIR/test.env"
-  warn "Existing environment file found; its current values will be used as defaults."
-  old_port="$(grep -E '^PORT=' "$SOURCE_ENV" | tail -n1 | cut -d= -f2- || true)"
-  old_host="$(grep -E '^HOST=' "$SOURCE_ENV" | tail -n1 | cut -d= -f2- || true)"
-  old_env="$(grep -E '^NODE_ENV=' "$SOURCE_ENV" | tail -n1 | cut -d= -f2- || true)"
-  old_secret="$(grep -E '^SESSION_SECRET=' "$SOURCE_ENV" | tail -n1 | cut -d= -f2- || true)"
-else
-  old_port="3000"
-  old_host="0.0.0.0"
-  old_env="development"
-  old_secret=""
-fi
-
-read_value() {
-  local label="$1" default="$2" result
-  printf "${WHITE}%s${RESET} ${DIM}[default: %s]${RESET}: " "$label" "$default"
-  read -r result
-  printf '%s' "${result:-$default}"
+node -e "const p=require(process.argv[1]); if(!p.name) process.exit(1)" "$SOURCE_DIR/package.json" || {
+  fail "package.json is invalid or missing its package name."
+  exit 1
 }
+mkdir -p "$INSTALL_DIR"
+INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd)"
+cp -a "$SOURCE_DIR/." "$INSTALL_DIR/"
+[[ ! -f "$WORK_DIR/existing.env" ]] || cp -p "$WORK_DIR/existing.env" "$INSTALL_DIR/.env"
+[[ ! -f "$WORK_DIR/existing.test.env" ]] || cp -p "$WORK_DIR/existing.test.env" "$INSTALL_DIR/test.env"
+ok "Panel files copied to $INSTALL_DIR; existing environment files preserved."
 
-PORT="$(read_value 'PORT' "${old_port:-3000}")"
-HOST="$(read_value 'HOST' "${old_host:-0.0.0.0}")"
-NODE_ENV="$(read_value 'NODE_ENV' "${old_env:-development}")"
-
-if [[ -n "${old_secret:-}" && "$old_secret" != "change-this-to-a-random-secret-key" ]]; then
-  default_secret="$old_secret"
-else
-  default_secret="$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")"
+step "Configuring environment"
+ENV_FILE="$INSTALL_DIR/.env"
+if [[ ! -f "$ENV_FILE" && -f "$INSTALL_DIR/test.env" ]]; then
+  cp -p "$INSTALL_DIR/test.env" "$ENV_FILE"
 fi
-printf "${WHITE}SESSION_SECRET${RESET} ${DIM}[Enter to generate/use secure default; leave blank to accept]${RESET}: "
-read -r SESSION_SECRET
-SESSION_SECRET="${SESSION_SECRET:-$default_secret}"
-
-if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
-  fail "PORT must be a number from 1 to 65535."
-  exit 1
-fi
-[[ -n "$HOST" ]] || { fail "HOST cannot be empty."; exit 1; }
-case "$NODE_ENV" in
-  development|production|test) ;;
-  *) warn "NODE_ENV '$NODE_ENV' is non-standard; keeping the value you entered." ;;
-esac
-[[ -n "$SESSION_SECRET" ]] || { fail "SESSION_SECRET cannot be empty."; exit 1; }
-
-umask 077
-cat > "$ENV_FILE" <<EOF
-# Atyro Panel v1.0.0 configuration
+if [[ ! -f "$ENV_FILE" ]]; then
+  PORT="$(prompt_value "PORT" "3000")"
+  HOST="$(prompt_value "HOST" "0.0.0.0")"
+  NODE_ENV="$(prompt_value "NODE_ENV" "production")"
+  SESSION_SECRET="$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('hex'))")"
+  umask 077
+  cat >"$ENV_FILE" <<EOF
 PORT=$PORT
 HOST=$HOST
 NODE_ENV=$NODE_ENV
 SESSION_SECRET=$SESSION_SECRET
 EOF
-chmod 600 "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+else
+  warn "Existing .env found; preserving it and all existing settings."
+  grep -q '^PORT=' "$ENV_FILE" || printf '\nPORT=3000\n' >>"$ENV_FILE"
+  grep -q '^HOST=' "$ENV_FILE" || printf 'HOST=0.0.0.0\n' >>"$ENV_FILE"
+  grep -q '^NODE_ENV=' "$ENV_FILE" || printf 'NODE_ENV=production\n' >>"$ENV_FILE"
+  if ! grep -q '^SESSION_SECRET=' "$ENV_FILE" ||
+     grep -q '^SESSION_SECRET=$' "$ENV_FILE" ||
+     grep -q '^SESSION_SECRET=change-this-to-a-random-secret-key$' "$ENV_FILE"; then
+    SECRET="$(node -e "process.stdout.write(require('crypto').randomBytes(48).toString('hex'))")"
+    if grep -q '^SESSION_SECRET=' "$ENV_FILE"; then
+      sed -i "s|^SESSION_SECRET=.*|SESSION_SECRET=$SECRET|" "$ENV_FILE"
+    else
+      printf '\nSESSION_SECRET=%s\n' "$SECRET" >>"$ENV_FILE"
+    fi
+  fi
+  chmod 600 "$ENV_FILE"
+fi
+# Maintain compatibility without replacing an existing compatibility file.
+if [[ ! -f "$INSTALL_DIR/test.env" ]]; then
+  cp "$ENV_FILE" "$INSTALL_DIR/test.env"
+  chmod 600 "$INSTALL_DIR/test.env"
+fi
+ok "Environment configuration is ready (secrets are not displayed)."
 
-# Keep test.env in sync for projects/releases that still expect that filename.
-cp "$ENV_FILE" "$INSTALL_DIR/test.env"
-chmod 600 "$INSTALL_DIR/test.env"
-ok ".env created; test.env compatibility copy also updated (permissions 600)."
-
-step "Installing Node.js dependencies"
+step "Installing and validating npm dependencies"
 cd "$INSTALL_DIR"
 if [[ -f package-lock.json ]]; then
-  npm ci --no-audit --no-fund >"$WORK_DIR/npm.log" 2>&1 &
+  if ! npm ci --no-audit --no-fund >"$WORK_DIR/npm.log" 2>&1; then
+    warn "npm ci failed (lockfile may be out of sync); trying npm install."
+    if ! npm install --no-audit --no-fund >>"$WORK_DIR/npm.log" 2>&1; then
+      tail -n 80 "$WORK_DIR/npm.log" >&2
+      fail "Could not install npm dependencies."
+      exit 1
+    fi
+  fi
 else
-  npm install --no-audit --no-fund >"$WORK_DIR/npm.log" 2>&1 &
+  if ! npm install --no-audit --no-fund >"$WORK_DIR/npm.log" 2>&1; then
+    tail -n 80 "$WORK_DIR/npm.log" >&2
+    fail "Could not install npm dependencies."
+    exit 1
+  fi
 fi
-pid=$!
-if spin "$pid" "Installing npm packages (this may take a few minutes)..."; then
-  ok "Node.js dependencies installed."
-else
-  cat "$WORK_DIR/npm.log" >&2
-  fail "npm dependency installation failed. See output above."
-  exit 1
-fi
+npm ls --depth=0 >/dev/null 2>&1 || warn "npm reports optional/peer dependency warnings; review 'npm ls --depth=0'."
+ok "npm dependencies installed."
 
-printf "\n${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
-printf "${GREEN}${BOLD}  ✔ ATYRO PANEL v1.0.0 INSTALLATION COMPLETE${RESET}\n"
-printf "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
-printf "${WHITE}Install path:${RESET} %s\n" "$INSTALL_DIR"
-printf "${WHITE}Config file: ${RESET} %s\n" "$ENV_FILE"
-printf "${WHITE}Compatibility:${RESET} %s/test.env\n" "$INSTALL_DIR"
-printf "${WHITE}Listen address:${RESET} %s:%s\n" "$HOST" "$PORT"
-printf "${WHITE}Environment:  ${RESET} %s\n" "$NODE_ENV"
-printf "${YELLOW}Session secret:${RESET} saved privately in test.env (not displayed)\n\n"
+# Keep permissions private for environment files.
+chmod 600 "$ENV_FILE" "$INSTALL_DIR/test.env" 2>/dev/null || true
 
-printf "${ORANGE}${BOLD}Next steps${RESET}\n"
+printf "\n%b━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%b\n" "$GREEN$BOLD" "$RESET"
+printf "%b  ✔ ATYRO PANEL INSTALLATION COMPLETE%b\n" "$GREEN$BOLD" "$RESET"
+printf "%b━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%b\n" "$GREEN$BOLD" "$RESET"
+printf "%bInstall path:%b %s\n" "$WHITE" "$RESET" "$INSTALL_DIR"
+printf "%bConfig file:%b  %s\n" "$WHITE" "$RESET" "$ENV_FILE"
+printf "%bNode.js:%b      %s\n" "$WHITE" "$RESET" "$NODE_VERSION"
+printf "%bEnvironment:%b  %s\n\n" "$WHITE" "$RESET" "$(grep '^NODE_ENV=' "$ENV_FILE" | tail -n1 | cut -d= -f2-)"
+printf "%bNext steps%b\n" "$ORANGE$BOLD" "$RESET"
 printf "  1. cd %q\n" "$INSTALL_DIR"
-printf "  2. Check the project's README/package.json for the correct start command.\n"
-printf "  3. Ensure the app loads ${BOLD}test.env${RESET}; Node.js apps do not automatically load that filename by default.\n"
-printf "  4. For production, set NODE_ENV=production and use a process manager/reverse proxy.\n\n"
-printf "${DIM}The installer does not start a service because the project's supported start command has not been assumed.${RESET}\n"
+printf "  2. Review README/package.json for the supported start command.\n"
+printf "  3. Start the panel using the project's documented command.\n"
+printf "  4. For production, use a process manager and configure your reverse proxy.\n\n"
+printf "%bNote:%b The installer does not guess or automatically launch an application service.\n" "$DIM" "$RESET"
