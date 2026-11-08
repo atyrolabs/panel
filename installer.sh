@@ -6,7 +6,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 REPO_URL="https://github.com/atyrolabs/panel.git"
-ZIP_NAME="atyro-panel-v1.0.0.zip"
+ZIP_NAME="panel.zip"
 DEFAULT_DIR="/var/www/panel"
 NODE_MAJOR="24"
 
