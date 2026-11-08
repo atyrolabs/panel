@@ -17,12 +17,12 @@
 
 ## 📖 About
 
-**Atyro Panel v1.0.0** is a web-based Minecraft server management panel developed by **Atyro Labs**. It brings common server administration tasks into a single interface, with a backend designed to communicate with remote nodes for server operations.
+**Atyro Panel v1.0.1** is a web-based Minecraft server management panel developed by **Atyro Labs**. It brings common server administration tasks into a single interface, with a backend designed to communicate with remote nodes for server operations.
 
 The project uses Node.js, Express, EJS, SQLite, and Socket.IO to provide its web application, data storage, and real-time communication components.
 
 > **Project:** Atyro Panel  
-> **Version:** `v1.0.0`  
+> **Version:** `v1.0.1`  
 > **Author:** Atyro Labs  
 > **Type:** Minecraft Server Management Panel
 
